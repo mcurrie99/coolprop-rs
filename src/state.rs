@@ -1352,7 +1352,7 @@ impl AbstractState {
         let mut molar_density = vec![0.0; max_points as usize];
         let mut stable = vec![0; max_points as usize];
 
-        with_coolprop(|coolprop| {
+        let result = with_coolprop(|coolprop| {
             with_error_buffer(
                 "AbstractState_all_critical_points",
                 |errcode, message, message_len| unsafe {
@@ -1369,7 +1369,11 @@ impl AbstractState {
                     )
                 },
             )
-        })?;
+        });
+
+        if let Err(err) = result {
+            return self.critical_point().map(|point| vec![point]).or(Err(err));
+        }
 
         Ok((0..temperature.len())
             .take_while(|index| {
@@ -1384,6 +1388,15 @@ impl AbstractState {
                 stable: stable[index] != 0,
             })
             .collect())
+    }
+
+    pub fn critical_point(&mut self) -> Result<CriticalPoint> {
+        Ok(CriticalPoint {
+            temperature: self.keyed_output_by_name("Tcrit")?,
+            pressure: self.keyed_output_by_name("pcrit")?,
+            molar_density: self.keyed_output_by_name("rhomolar_critical")?,
+            stable: true,
+        })
     }
 }
 
