@@ -1,0 +1,13 @@
+[package]
+name = "coolprop-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Safe Rust interface for CoolProp's high-level and AbstractState APIs."
+readme = "README.md"
+keywords = ["coolprop", "thermodynamics", "fluids", "ffi"]
+categories = ["api-bindings", "science"]
+
+[dependencies]
+coolprop-sys = "7.2.1"
