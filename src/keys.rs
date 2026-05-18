@@ -23,9 +23,19 @@ pub enum Parameter {
     MolarMass,
     SurfaceTension,
     CompressibilityFactor,
+    GasConstant,
+    HelmholtzMass,
+    HelmholtzMolar,
+    GibbsMass,
+    GibbsMolar,
     CriticalTemperature,
     CriticalPressure,
     CriticalDensity,
+    TripleTemperature,
+    TriplePressure,
+    ReducingTemperature,
+    ReducingDensity,
+    AcentricFactor,
 }
 
 impl Parameter {
@@ -53,9 +63,19 @@ impl Parameter {
             Self::MolarMass => "M",
             Self::SurfaceTension => "I",
             Self::CompressibilityFactor => "Z",
+            Self::GasConstant => "gas_constant",
+            Self::HelmholtzMass => "Helmholtzmass",
+            Self::HelmholtzMolar => "Helmholtzmolar",
+            Self::GibbsMass => "Gmass",
+            Self::GibbsMolar => "Gmolar",
             Self::CriticalTemperature => "Tcrit",
             Self::CriticalPressure => "Pcrit",
             Self::CriticalDensity => "rhocrit",
+            Self::TripleTemperature => "Ttriple",
+            Self::TriplePressure => "ptriple",
+            Self::ReducingTemperature => "T_reducing",
+            Self::ReducingDensity => "rhoreducing",
+            Self::AcentricFactor => "acentric",
         }
     }
 }
@@ -63,27 +83,27 @@ impl Parameter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum InputPair {
-    /// value1 = pressure [Pa], value2 = temperature [K]
+    /// value1 = pressure (Pa), value2 = temperature (K)
     PressureTemperature,
-    /// value1 = pressure [Pa], value2 = vapor quality [mol/mol]
+    /// value1 = pressure (Pa), value2 = vapor quality (mol/mol)
     PressureQuality,
-    /// value1 = vapor quality [mol/mol], value2 = temperature [K]
+    /// value1 = vapor quality (mol/mol), value2 = temperature (K)
     QualityTemperature,
-    /// value1 = mass density [kg/m^3], value2 = temperature [K]
+    /// value1 = mass density (kg/m^3), value2 = temperature (K)
     MassDensityTemperature,
-    /// value1 = molar density [mol/m^3], value2 = temperature [K]
+    /// value1 = molar density (mol/m^3), value2 = temperature (K)
     MolarDensityTemperature,
-    /// value1 = mass enthalpy [J/kg], value2 = pressure [Pa]
+    /// value1 = mass enthalpy (J/kg), value2 = pressure (Pa)
     MassEnthalpyPressure,
-    /// value1 = molar enthalpy [J/mol], value2 = pressure [Pa]
+    /// value1 = molar enthalpy (J/mol), value2 = pressure (Pa)
     MolarEnthalpyPressure,
-    /// value1 = pressure [Pa], value2 = mass entropy [J/kg/K]
+    /// value1 = pressure (Pa), value2 = mass entropy (J/kg/K)
     PressureMassEntropy,
-    /// value1 = pressure [Pa], value2 = molar entropy [J/mol/K]
+    /// value1 = pressure (Pa), value2 = molar entropy (J/mol/K)
     PressureMolarEntropy,
-    /// value1 = mass internal energy [J/kg], value2 = mass density [kg/m^3]
+    /// value1 = mass internal energy (J/kg), value2 = mass density (kg/m^3)
     MassInternalEnergyMassDensity,
-    /// value1 = molar internal energy [J/mol], value2 = molar density [mol/m^3]
+    /// value1 = molar internal energy (J/mol), value2 = molar density (mol/m^3)
     MolarInternalEnergyMolarDensity,
 }
 
@@ -181,6 +201,38 @@ impl ReferenceState {
             Self::Ashrae => "ASHRAE",
             Self::Iir => "IIR",
             Self::Nbp => "NBP",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SaturationBranch {
+    Liquid,
+    Vapor,
+}
+
+impl SaturationBranch {
+    pub const fn as_quality(self) -> i32 {
+        match self {
+            Self::Liquid => 0,
+            Self::Vapor => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SaturatedState {
+    Liquid,
+    Vapor,
+}
+
+impl SaturatedState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Liquid => "liquid",
+            Self::Vapor => "gas",
         }
     }
 }

@@ -6,22 +6,32 @@
 
 mod error;
 mod keys;
+mod multi;
 mod state;
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_long};
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::LazyLock;
+#[cfg(not(feature = "unsafe-reentrant"))]
+use std::sync::{Mutex, MutexGuard};
 
 use coolprop_sys::bindings::CoolProp;
 
 pub use crate::error::{Error, Result};
-pub use crate::keys::{InputPair, Parameter, Phase, PhaseSpecifier, ReferenceState};
-pub use crate::state::{AbstractState, CommonOutputs};
+pub use crate::keys::{
+    InputPair, Parameter, Phase, PhaseSpecifier, ReferenceState, SaturatedState, SaturationBranch,
+};
+pub use crate::multi::{props1_si_multi, props_si_multi, props_si_multi_pure, PropsSIOutput};
+pub use crate::state::{
+    AbstractState, BatchFiveOutputs, CommonOutputs, CriticalPoint, PhaseEnvelopeData,
+    PhaseEnvelopePoint, SpinodalPoint, StateUpdate,
+};
 
 const STRING_BUFFER_LEN: usize = 65_536;
 const ERROR_BUFFER_LEN: usize = 4_096;
 const COOLPROP_ERROR_SENTINEL_ABS: f64 = 1.0e90;
 
+#[cfg(not(feature = "unsafe-reentrant"))]
 static COOLPROP: LazyLock<Result<Mutex<CoolProp>>> = LazyLock::new(|| {
     let path = coolprop_sys::COOLPROP_PATH;
     let library = unsafe { CoolProp::new(path) }.map_err(|err| Error::LibraryLoad {
@@ -30,6 +40,46 @@ static COOLPROP: LazyLock<Result<Mutex<CoolProp>>> = LazyLock::new(|| {
     })?;
     Ok(Mutex::new(library))
 });
+
+#[cfg(feature = "unsafe-reentrant")]
+static COOLPROP: LazyLock<Result<ReentrantCoolProp>> = LazyLock::new(|| {
+    let path = coolprop_sys::COOLPROP_PATH;
+    let library = unsafe { CoolProp::new(path) }.map_err(|err| Error::LibraryLoad {
+        path: path.to_owned(),
+        message: err.to_string(),
+    })?;
+    preload_coolprop_library(&library)?;
+    Ok(ReentrantCoolProp(library))
+});
+
+#[cfg(feature = "unsafe-reentrant")]
+struct ReentrantCoolProp(CoolProp);
+
+#[cfg(feature = "unsafe-reentrant")]
+unsafe impl Send for ReentrantCoolProp {}
+
+#[cfg(feature = "unsafe-reentrant")]
+unsafe impl Sync for ReentrantCoolProp {}
+
+#[cfg(feature = "unsafe-reentrant")]
+fn preload_coolprop_library(library: &CoolProp) -> Result<()> {
+    let param = CString::new("FluidsList").expect("static string does not contain NUL");
+    let mut buffer = vec![0_u8; STRING_BUFFER_LEN];
+    let status = unsafe {
+        library.get_global_param_string(
+            param.as_ptr(),
+            buffer.as_mut_ptr().cast::<c_char>(),
+            STRING_BUFFER_LEN as c_int,
+        )
+    };
+    if status == 1 {
+        Ok(())
+    } else {
+        Err(Error::coolprop_message(
+            "failed to preload CoolProp fluid library",
+        ))
+    }
+}
 
 pub fn props_si(
     output: impl AsRef<str>,
@@ -142,6 +192,39 @@ pub fn ha_props_si(
     })
 }
 
+pub fn saturation_ancillary(
+    fluid_name: impl AsRef<str>,
+    output: impl AsRef<str>,
+    branch: SaturationBranch,
+    input: impl AsRef<str>,
+    value: f64,
+) -> Result<f64> {
+    let fluid_name = c_string(fluid_name.as_ref(), "fluid_name")?;
+    let output = c_string(output.as_ref(), "output")?;
+    let input = c_string(input.as_ref(), "input")?;
+
+    with_coolprop(|coolprop| {
+        let value = unsafe {
+            coolprop.saturation_ancillary(
+                fluid_name.as_ptr(),
+                output.as_ptr(),
+                branch.as_quality(),
+                input.as_ptr(),
+                value,
+            )
+        };
+        validate_scalar(coolprop, "saturation_ancillary", value)
+    })
+}
+
+pub fn fahrenheit_to_kelvin(temperature_f: f64) -> Result<f64> {
+    with_coolprop(|coolprop| Ok(unsafe { coolprop.F2K(temperature_f) }))
+}
+
+pub fn kelvin_to_fahrenheit(temperature_k: f64) -> Result<f64> {
+    with_coolprop(|coolprop| Ok(unsafe { coolprop.K2F(temperature_k) }))
+}
+
 pub fn global_param_string(param: impl AsRef<str>) -> Result<String> {
     let param = c_string(param.as_ref(), "param")?;
     with_coolprop(|coolprop| global_param_string_locked(coolprop, &param, STRING_BUFFER_LEN))
@@ -157,6 +240,47 @@ pub fn git_revision() -> Result<String> {
 
 pub fn fluids_list() -> Result<String> {
     global_param_string("FluidsList")
+}
+
+pub fn predefined_mixtures_list() -> Result<String> {
+    global_param_string("predefined_mixtures")
+}
+
+pub fn parameter_information_string(
+    parameter: impl AsRef<str>,
+    information: impl AsRef<str>,
+) -> Result<String> {
+    let parameter = c_string(parameter.as_ref(), "parameter")?;
+    let information = c_string(information.as_ref(), "information")?;
+
+    with_coolprop(|coolprop| {
+        let mut buffer = vec![0_u8; STRING_BUFFER_LEN];
+        let info_bytes = information.as_bytes_with_nul();
+        if info_bytes.len() > buffer.len() {
+            return Err(Error::BufferTooSmall {
+                function: "get_parameter_information_string",
+                size: buffer.len(),
+            });
+        }
+        buffer[..info_bytes.len()].copy_from_slice(info_bytes);
+
+        let status = unsafe {
+            coolprop.get_parameter_information_string(
+                parameter.as_ptr(),
+                buffer.as_mut_ptr().cast::<c_char>(),
+                buffer_len_to_c_int("get_parameter_information_string", buffer.len())?,
+            )
+        };
+
+        if status == 1 {
+            Ok(buffer_to_string(&buffer))
+        } else {
+            let info = information.to_string_lossy();
+            Err(Error::coolprop_message(format!(
+                "unable to read parameter information field {info}"
+            )))
+        }
+    })
 }
 
 pub fn parameter_index(param: impl AsRef<str>) -> Result<c_long> {
@@ -245,6 +369,112 @@ pub fn set_reference_state_by_name(
     })
 }
 
+pub fn set_reference_state_custom(
+    fluid: impl AsRef<str>,
+    temperature: f64,
+    molar_density: f64,
+    molar_enthalpy0: f64,
+    molar_entropy0: f64,
+) -> Result<()> {
+    let fluid = c_string(fluid.as_ref(), "fluid")?;
+
+    with_coolprop(|coolprop| {
+        let status = unsafe {
+            coolprop.set_reference_stateD(
+                fluid.as_ptr(),
+                temperature,
+                molar_density,
+                molar_enthalpy0,
+                molar_entropy0,
+            )
+        };
+        if status == 1 {
+            Ok(())
+        } else {
+            Err(last_error(coolprop, "set_reference_stateD"))
+        }
+    })
+}
+
+pub fn add_fluids_as_json(backend: impl AsRef<str>, fluid_json: impl AsRef<str>) -> Result<()> {
+    let backend = c_string(backend.as_ref(), "backend")?;
+    let fluid_json = c_string(fluid_json.as_ref(), "fluid_json")?;
+
+    with_coolprop(|coolprop| {
+        with_error_buffer(
+            "add_fluids_as_JSON",
+            |errcode, message, message_len| unsafe {
+                coolprop.add_fluids_as_JSON(
+                    backend.as_ptr(),
+                    fluid_json.as_ptr(),
+                    errcode,
+                    message,
+                    message_len,
+                )
+            },
+        )
+    })
+}
+
+pub fn extract_backend(fluid_string: impl AsRef<str>) -> Result<(String, String)> {
+    let fluid_string = c_string(fluid_string.as_ref(), "fluid_string")?;
+
+    with_coolprop(|coolprop| {
+        let mut backend = vec![0_u8; 256];
+        let mut fluid = vec![0_u8; STRING_BUFFER_LEN];
+        let status = unsafe {
+            coolprop.C_extract_backend(
+                fluid_string.as_ptr(),
+                backend.as_mut_ptr().cast::<c_char>(),
+                buffer_len_to_c_long("C_extract_backend backend", backend.len())?,
+                fluid.as_mut_ptr().cast::<c_char>(),
+                buffer_len_to_c_long("C_extract_backend fluid", fluid.len())?,
+            )
+        };
+        if status == 0 {
+            Ok((buffer_to_string(&backend), buffer_to_string(&fluid)))
+        } else {
+            Err(last_error(coolprop, "C_extract_backend"))
+        }
+    })
+}
+
+pub fn debug_level() -> Result<c_int> {
+    with_coolprop(|coolprop| Ok(unsafe { coolprop.get_debug_level() }))
+}
+
+pub fn set_debug_level(level: c_int) -> Result<()> {
+    with_coolprop(|coolprop| {
+        unsafe { coolprop.set_debug_level(level) };
+        Ok(())
+    })
+}
+
+pub fn set_config_string(key: impl AsRef<str>, value: impl AsRef<str>) -> Result<()> {
+    let key = c_string(key.as_ref(), "key")?;
+    let value = c_string(value.as_ref(), "value")?;
+    with_coolprop(|coolprop| {
+        unsafe { coolprop.set_config_string(key.as_ptr(), value.as_ptr()) };
+        Ok(())
+    })
+}
+
+pub fn set_config_double(key: impl AsRef<str>, value: f64) -> Result<()> {
+    let key = c_string(key.as_ref(), "key")?;
+    with_coolprop(|coolprop| {
+        unsafe { coolprop.set_config_double(key.as_ptr(), value) };
+        Ok(())
+    })
+}
+
+pub fn set_config_bool(key: impl AsRef<str>, value: bool) -> Result<()> {
+    let key = c_string(key.as_ref(), "key")?;
+    with_coolprop(|coolprop| {
+        unsafe { coolprop.set_config_bool(key.as_ptr(), value) };
+        Ok(())
+    })
+}
+
 #[allow(non_snake_case)]
 pub fn PropsSI(
     output: impl AsRef<str>,
@@ -286,9 +516,56 @@ pub fn HAPropsSI(
     ha_props_si(output, name1, prop1, name2, prop2, name3, prop3)
 }
 
+#[allow(non_snake_case)]
+#[allow(clippy::too_many_arguments)]
+pub fn PropsSImulti(
+    outputs: &[impl AsRef<str>],
+    name1: impl AsRef<str>,
+    prop1: &[f64],
+    name2: impl AsRef<str>,
+    prop2: &[f64],
+    backend: impl AsRef<str>,
+    fluids: &[impl AsRef<str>],
+    fractions: &[f64],
+) -> Result<PropsSIOutput> {
+    props_si_multi(
+        outputs, name1, prop1, name2, prop2, backend, fluids, fractions,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn Props1SImulti(
+    outputs: &[impl AsRef<str>],
+    backend: impl AsRef<str>,
+    fluids: &[impl AsRef<str>],
+    fractions: &[f64],
+) -> Result<Vec<f64>> {
+    props1_si_multi(outputs, backend, fluids, fractions)
+}
+
+#[allow(non_snake_case)]
+pub fn SaturationAncillary(
+    fluid_name: impl AsRef<str>,
+    output: impl AsRef<str>,
+    branch: SaturationBranch,
+    input: impl AsRef<str>,
+    value: f64,
+) -> Result<f64> {
+    saturation_ancillary(fluid_name, output, branch, input, value)
+}
+
+#[cfg(not(feature = "unsafe-reentrant"))]
 pub(crate) fn with_coolprop<T>(f: impl FnOnce(&CoolProp) -> Result<T>) -> Result<T> {
     let guard = coolprop_guard()?;
     f(&guard)
+}
+
+#[cfg(feature = "unsafe-reentrant")]
+pub(crate) fn with_coolprop<T>(f: impl FnOnce(&CoolProp) -> Result<T>) -> Result<T> {
+    match &*COOLPROP {
+        Ok(library) => f(&library.0),
+        Err(err) => Err(err.clone()),
+    }
 }
 
 pub(crate) fn c_string(value: &str, field: &'static str) -> Result<CString> {
@@ -358,6 +635,7 @@ pub(crate) fn buffer_to_string(buffer: &[u8]) -> String {
     String::from_utf8_lossy(&buffer[..len]).trim().to_owned()
 }
 
+#[cfg(not(feature = "unsafe-reentrant"))]
 fn coolprop_guard() -> Result<MutexGuard<'static, CoolProp>> {
     match &*COOLPROP {
         Ok(mutex) => mutex.lock().map_err(|_| Error::LockPoisoned),
@@ -394,7 +672,7 @@ fn global_param_string_locked(
     }
 }
 
-fn last_error(coolprop: &CoolProp, function: &'static str) -> Error {
+pub(crate) fn last_error(coolprop: &CoolProp, function: &'static str) -> Error {
     let message = c_string("errstring", "param")
         .and_then(|param| global_param_string_locked(coolprop, &param, STRING_BUFFER_LEN))
         .unwrap_or_else(|_| "CoolProp did not provide an error string".to_owned());
@@ -427,11 +705,16 @@ fn buffer_len_to_c_int(function: &'static str, len: usize) -> Result<c_int> {
     })
 }
 
-fn buffer_len_to_c_long(function: &'static str, len: usize) -> Result<c_long> {
+pub(crate) fn buffer_len_to_c_long(function: &'static str, len: usize) -> Result<c_long> {
     len.try_into().map_err(|_| Error::LengthOverflow {
         what: function,
         len,
     })
+}
+
+pub(crate) fn usize_to_c_long(what: &'static str, len: usize) -> Result<c_long> {
+    len.try_into()
+        .map_err(|_| Error::LengthOverflow { what, len })
 }
 
 #[cfg(test)]
@@ -471,5 +754,18 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    #[test]
+    fn metadata_helpers_work() {
+        assert!(!version().unwrap().is_empty());
+        assert_eq!(parameter_information_string("T", "units").unwrap(), "K");
+        assert!(
+            saturation_ancillary("Water", "P", SaturationBranch::Liquid, "T", 300.0).unwrap() > 0.0
+        );
+        assert_eq!(
+            extract_backend("HEOS::Water").unwrap(),
+            ("HEOS".to_owned(), "Water".to_owned())
+        );
     }
 }

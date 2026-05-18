@@ -29,6 +29,15 @@ pub enum Error {
         function: &'static str,
         size: usize,
     },
+    DimensionMismatch {
+        left: &'static str,
+        left_len: usize,
+        right: &'static str,
+        right_len: usize,
+    },
+    EmptyInput {
+        what: &'static str,
+    },
     LengthOverflow {
         what: &'static str,
         len: usize,
@@ -82,6 +91,18 @@ impl fmt::Display for Error {
             Self::BufferTooSmall { function, size } => {
                 write!(f, "{function} output did not fit in a {size}-byte buffer")
             }
+            Self::DimensionMismatch {
+                left,
+                left_len,
+                right,
+                right_len,
+            } => {
+                write!(
+                    f,
+                    "{left} length {left_len} does not match {right} length {right_len}"
+                )
+            }
+            Self::EmptyInput { what } => write!(f, "{what} must not be empty"),
             Self::LengthOverflow { what, len } => {
                 write!(
                     f,

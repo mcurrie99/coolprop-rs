@@ -6,8 +6,17 @@ rust-version = "1.85"
 license = "MIT"
 description = "Safe Rust interface for CoolProp's high-level and AbstractState APIs."
 readme = "README.md"
+repository = "https://github.com/mcurrie99/coolprop-rs"
+documentation = "https://docs.rs/coolprop-rs"
 keywords = ["coolprop", "thermodynamics", "fluids", "ffi"]
 categories = ["api-bindings", "science"]
 
 [dependencies]
 coolprop-sys = "7.2.1"
+
+[features]
+default = []
+# Opt out of the process-wide CoolProp mutex and call the shared library concurrently.
+# Enable only after validating that your target CoolProp build and selected backends are reentrant
+# for your workload; the default remains serialized and safe.
+unsafe-reentrant = []
